@@ -18,7 +18,7 @@
 NSString* dictionary(char* searchword) {
   NSString* word = [NSString stringWithUTF8String:searchword];
   return (NSString*)DCSCopyTextDefinition(NULL, (CFStringRef)word,
-                                          CFRangeMake(0, [word length]));
+                                          CFRangeMake(0, (CFIndex)[word length]));
 }
 
 NSString* suggest(char* w) {
