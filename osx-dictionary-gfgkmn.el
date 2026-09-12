@@ -24,6 +24,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'subr-x)
 (require 'osx-dictionary)
 
@@ -235,6 +236,43 @@ Purely additive: `window' leaves every previous code path untouched."
 (defconst gfgkmn/osx-dict--max-frame-width 92
   "Widest the child frame may get, in total columns, margins included.")
 
+(defcustom gfgkmn/osx-dict-child-frame-contrast 8
+  "Percent of HSL lightness to move the child frame's background by.
+Away from the ambient background, so lighter on a dark theme and darker on a
+light one — an undecorated frame sharing its parent's exact background reads
+as a hole in the buffer rather than a surface floating over it.  0 disables
+the shift and restores the previous behaviour."
+  :type 'integer)
+
+(defcustom gfgkmn/osx-dict-child-frame-border-contrast 22
+  "Like `gfgkmn/osx-dict-child-frame-contrast', but for the border.
+Shifted further than the background and in the same direction, so the edge
+stays visible once the two surfaces are no longer identical."
+  :type 'integer)
+
+(defun gfgkmn/osx-dict--dark-p (color)
+  "Non-nil when COLOR is dark, by Rec. 601 luma."
+  (let ((rgb (color-name-to-rgb color)))
+    (or (null rgb)                      ; unparseable: assume a dark theme
+        (< (+ (* 0.299 (nth 0 rgb))
+              (* 0.587 (nth 1 rgb))
+              (* 0.114 (nth 2 rgb)))
+           0.5))))
+
+(defun gfgkmn/osx-dict--shift (color percent)
+  "COLOR moved PERCENT of lightness AWAY from itself.
+Direction follows the colour: dark gets lighter, light gets darker, so one
+setting works on both a dark and a light theme without a special case."
+  (cond ((or (null color) (<= percent 0)) color)
+        ((gfgkmn/osx-dict--dark-p color) (color-lighten-name color percent))
+        (t (color-darken-name color percent))))
+
+(defun gfgkmn/osx-dict--surface-colors (parent)
+  "Return (BACKGROUND . BORDER) for a child frame over PARENT."
+  (let ((bg (or (face-background 'default parent t) "#282c34")))
+    (cons (gfgkmn/osx-dict--shift bg gfgkmn/osx-dict-child-frame-contrast)
+          (gfgkmn/osx-dict--shift bg gfgkmn/osx-dict-child-frame-border-contrast))))
+
 (defun gfgkmn/osx-dict--fit-bounds ()
   "MAX-HEIGHT MIN-HEIGHT MAX-WIDTH MIN-WIDTH for `fit-frame-to-buffer'.
 
@@ -316,8 +354,15 @@ ordinary window actions — which is what keeps the `window' style intact."
            (win (frame-selected-window f)))
       (set-window-buffer win buffer)
       (set-window-margins win gfgkmn/osx-dict--margin gfgkmn/osx-dict--margin)
-      (set-face-background 'internal-border
-                           (or (face-foreground 'shadow nil t) "#5B6268") f)
+      ;; Re-derived on every display, not just at creation: the frame is reused
+      ;; across lookups, and the theme can change under it.  Both are scoped to
+      ;; F — `set-frame-parameter' is frame-local by definition, and passing F
+      ;; to `set-face-background' keeps that attribute off every other frame.
+      ;; (A frame-wide `set-face-background' would be inherited by frames
+      ;; created later, over the theme.)
+      (let ((colors (gfgkmn/osx-dict--surface-colors parent)))
+        (set-frame-parameter f 'background-color (car colors))
+        (set-face-background 'internal-border (cdr colors) f))
       (gfgkmn/osx-dict--fit-and-centre)
       (make-frame-visible f)
       (select-frame-set-input-focus f)
