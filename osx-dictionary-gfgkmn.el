@@ -16,7 +16,8 @@
 ;;      together -- re-rendering the word already on screen.
 ;;   2. A lemma fallback, so a dictionary with a thin inflection index (the
 ;;      Collins CCED bundle) stops returning blank for "books" or "ran".
-;;   3. An optional centred child-frame display, sized to its content.
+;;   3. A centred child-frame display, sized to its content -- the default;
+;;      set `gfgkmn/osx-dict-display-style' to `window' for the stock one.
 ;;
 ;; Personal choices -- which dictionaries, which display style -- belong in
 ;; your init file rather than here; see the defcustoms.
@@ -213,17 +214,22 @@ headwords away from English suffix stripping."
     (kbd "s") #'gfgkmn/osx-dict-toggle-dictionary
     (kbd "S") #'osx-dictionary-select-dictionary))
 
-;;;; *osx-dictionary* display: window (default) or centred child frame
+;;;; *osx-dictionary* display: centred child frame (default) or window
 
-(defcustom gfgkmn/osx-dict-display-style 'window
+(defcustom gfgkmn/osx-dict-display-style 'child-frame
   "How the `*osx-dictionary*' buffer is shown.
 
-`window'      the long-standing behaviour — a window on the current frame.
-`child-frame' a centred, undecorated child frame sized to its content, in
-              the style of a posframe: no mode-line, no header-line, no
-              fringes, no minibuffer of its own.
+`child-frame' (default) a centred, undecorated child frame sized to its
+              content, in the style of a posframe: no mode-line, no
+              header-line, no fringes, no minibuffer of its own.
+`window'      the stock osx-dictionary behaviour — a window on the current
+              frame.  Every code path it takes is untouched by this file, so
+              it is the escape hatch if the child frame misbehaves.
 
-Purely additive: `window' leaves every previous code path untouched."
+Known cost of `child-frame': owning no minibuffer, \"/\" and \"S\" prompt on
+the PARENT frame's echo area and leave point there.  That keeps the frame to
+a single window, which is what makes the content-fit unambiguous.  \"s\" and
+\"q\" need no minibuffer and are unaffected."
   :type '(choice (const :tag "Window on the current frame" window)
                  (const :tag "Centred child frame" child-frame)))
 
