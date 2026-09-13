@@ -227,8 +227,51 @@ Purely additive: `window' leaves every previous code path untouched."
   :type '(choice (const :tag "Window on the current frame" window)
                  (const :tag "Centred child frame" child-frame)))
 
-(defvar gfgkmn/osx-dict--child-frame nil
-  "The live child frame showing `*osx-dictionary*', if any.")
+;;;; Per-parent state
+;;
+;; One global child frame was wrong twice over.  A lookup from frame B reused
+;; the frame parented to A, so the definition appeared on the frame you were
+;; not looking at; and a single `*osx-dictionary*' buffer meant two frames
+;; could never show different words anyway.
+;;
+;; Both are keyed off the PARENT frame now, and stored as frame parameters
+;; rather than in a global registry: a frame parameter dies with its frame, so
+;; there is no alist to garbage-collect and no way to leak a reference to a
+;; dead frame.
+
+(defvar gfgkmn/osx-dict--frame-counter 0
+  "Source of the small stable ids used in per-frame buffer names.")
+
+(defun gfgkmn/osx-dict--host-frame (&optional frame)
+  "The frame a lookup belongs to: FRAME, or its parent if it IS a popup.
+`s' re-renders from inside the child frame, where `selected-frame' is the
+popup itself; without this the popup would try to parent to itself."
+  (let ((f (or frame (selected-frame))))
+    (or (frame-parameter f 'parent-frame) f)))
+
+(defun gfgkmn/osx-dict--frame-id (frame)
+  "A small integer identifying FRAME, assigned on first use.
+Frame NAMES are unusable for this -- they change as buffers change."
+  (or (frame-parameter frame 'gfgkmn/osx-dict-id)
+      (let ((id (cl-incf gfgkmn/osx-dict--frame-counter)))
+        (set-frame-parameter frame 'gfgkmn/osx-dict-id id)
+        id)))
+
+(defun gfgkmn/osx-dict--popup-frame (&optional host)
+  "The live child frame belonging to HOST, or nil."
+  (let ((f (frame-parameter (or host (gfgkmn/osx-dict--host-frame))
+                            'gfgkmn/osx-dict-child)))
+    (and (frame-live-p f) f)))
+
+(defun gfgkmn/osx-dict-buffer-name (_word)
+  "Per-frame name for the result buffer.
+Installed as `osx-dictionary-generate-buffer-name-function'.  One buffer per
+host frame is what lets two frames show two different words at once; with
+upstream's single fixed name they would always share one."
+  (format "*osx-dictionary %d*"
+          (gfgkmn/osx-dict--frame-id (gfgkmn/osx-dict--host-frame))))
+
+(setq osx-dictionary-generate-buffer-name-function #'gfgkmn/osx-dict-buffer-name)
 
 (defconst gfgkmn/osx-dict--margin 3
   "Columns of breathing room inside each side of the child frame.")
@@ -273,6 +316,33 @@ setting works on both a dark and a light theme without a special case."
     (cons (gfgkmn/osx-dict--shift bg gfgkmn/osx-dict-child-frame-contrast)
           (gfgkmn/osx-dict--shift bg gfgkmn/osx-dict-child-frame-border-contrast))))
 
+(defun gfgkmn/osx-dict--paint-surface (frame parent)
+  "Give FRAME a background distinct from PARENT's, plus a matching border.
+
+Setting the `background-color' frame parameter is NOT enough, twice over --
+both measured rather than assumed:
+
+  * A face carrying an explicit background beats the frame parameter, and the
+    theme gives `default' one.  With only the parameter set, the frame read
+    \"#3043...\" while `default' on it still reported the parent's #21242B.
+  * `solaire-mode' remaps `default' to `solaire-default-face' in this buffer
+    \(face-remapping-alist holds `(default solaire-default-face default)'), so
+    even a corrected `default' would not be what actually paints.
+
+Hence all three, and every one of them scoped to FRAME.  That scoping is the
+part to preserve: a frame-wide `set-face-background' records an attribute
+that frames created LATER inherit over the theme, which is exactly how an
+earlier change left black fringes on new frames after a theme switch.
+Verified — after this runs, every other live frame still reports the theme's
+own background for both faces."
+  (let* ((colors (gfgkmn/osx-dict--surface-colors parent))
+         (bg (car colors)))
+    (set-frame-parameter frame 'background-color bg)
+    (set-face-background 'default bg frame)
+    (when (facep 'solaire-default-face)
+      (set-face-background 'solaire-default-face bg frame))
+    (set-face-background 'internal-border (cdr colors) frame)))
+
 (defun gfgkmn/osx-dict--fit-bounds ()
   "MAX-HEIGHT MIN-HEIGHT MAX-WIDTH MIN-WIDTH for `fit-frame-to-buffer'.
 
@@ -305,10 +375,10 @@ must actively restore what `child-frame' stripped — otherwise switching
                  left-margin-width right-margin-width))
       (kill-local-variable v))))
 
-(defun gfgkmn/osx-dict--fit-and-centre ()
-  "Size the child frame to its content, then centre it on its parent.
+(defun gfgkmn/osx-dict--fit-and-centre (&optional host)
+  "Size HOST's child frame to its content, then centre it on HOST.
 Order matters: fitting changes the size, so centring must follow it."
-  (let ((f gfgkmn/osx-dict--child-frame))
+  (let ((f (gfgkmn/osx-dict--popup-frame host)))
     (when (frame-live-p f)
       (apply #'fit-frame-to-buffer f (gfgkmn/osx-dict--fit-bounds))
       (let ((parent (frame-parameter f 'parent-frame)))
@@ -343,14 +413,13 @@ ordinary window actions — which is what keeps the `window' style intact."
       (progn (with-current-buffer buffer (gfgkmn/osx-dict--apply-chrome nil))
              nil)
     (with-current-buffer buffer (gfgkmn/osx-dict--apply-chrome t))
-    (let* ((sel (selected-frame))
-           ;; when "s" re-renders we are already INSIDE the child frame, so
-           ;; parent to its parent rather than nesting a frame in a frame
-           (parent (or (frame-parameter sel 'parent-frame) sel))
-           (f (if (frame-live-p gfgkmn/osx-dict--child-frame)
-                  gfgkmn/osx-dict--child-frame
-                (setq gfgkmn/osx-dict--child-frame
-                      (gfgkmn/osx-dict--make-child-frame parent))))
+    (let* ((parent (gfgkmn/osx-dict--host-frame))
+           ;; Reuse only THIS host's popup.  Reusing whichever popup happened to
+           ;; exist rendered frame B's lookup onto frame A.
+           (f (or (gfgkmn/osx-dict--popup-frame parent)
+                  (let ((new (gfgkmn/osx-dict--make-child-frame parent)))
+                    (set-frame-parameter parent 'gfgkmn/osx-dict-child new)
+                    new)))
            (win (frame-selected-window f)))
       (set-window-buffer win buffer)
       (set-window-margins win gfgkmn/osx-dict--margin gfgkmn/osx-dict--margin)
@@ -360,10 +429,8 @@ ordinary window actions — which is what keeps the `window' style intact."
       ;; to `set-face-background' keeps that attribute off every other frame.
       ;; (A frame-wide `set-face-background' would be inherited by frames
       ;; created later, over the theme.)
-      (let ((colors (gfgkmn/osx-dict--surface-colors parent)))
-        (set-frame-parameter f 'background-color (car colors))
-        (set-face-background 'internal-border (cdr colors) f))
-      (gfgkmn/osx-dict--fit-and-centre)
+      (gfgkmn/osx-dict--paint-surface f parent)
+      (gfgkmn/osx-dict--fit-and-centre parent)
       (make-frame-visible f)
       (select-frame-set-input-focus f)
       win)))
@@ -373,20 +440,39 @@ ordinary window actions — which is what keeps the `window' style intact."
 Needed because `osx-dictionary--goto-dictionary' short-circuits to
 `select-window' when the buffer already has a window in the selected frame,
 so `display-buffer' — and with it the fit — never runs on that path."
-  (when (and (eq gfgkmn/osx-dict-display-style 'child-frame)
-             (frame-live-p gfgkmn/osx-dict--child-frame))
-    (gfgkmn/osx-dict--fit-and-centre)))
+  (when (eq gfgkmn/osx-dict-display-style 'child-frame)
+    (let ((host (gfgkmn/osx-dict--host-frame)))
+      (when (gfgkmn/osx-dict--popup-frame host)
+        (gfgkmn/osx-dict--fit-and-centre host)))))
 
 (advice-add 'osx-dictionary--view-result :after #'gfgkmn/osx-dict--refit-a)
 
-(defun gfgkmn/osx-dict-kill-child-frame ()
-  "Delete the dictionary child frame, returning focus to its parent."
+(defun gfgkmn/osx-dict-kill-child-frame (&optional host)
+  "Delete HOST's dictionary child frame, returning focus to HOST."
   (interactive)
-  (when (frame-live-p gfgkmn/osx-dict--child-frame)
-    (let ((parent (frame-parameter gfgkmn/osx-dict--child-frame 'parent-frame)))
-      (delete-frame gfgkmn/osx-dict--child-frame)
-      (when (frame-live-p parent) (select-frame-set-input-focus parent))))
-  (setq gfgkmn/osx-dict--child-frame nil))
+  (let* ((host (or host (gfgkmn/osx-dict--host-frame)))
+         (f (gfgkmn/osx-dict--popup-frame host)))
+    (when f (delete-frame f))
+    (when (frame-live-p host)
+      (set-frame-parameter host 'gfgkmn/osx-dict-child nil)
+      (when f (select-frame-set-input-focus host)))))
+
+(defun gfgkmn/osx-dict--cleanup-on-frame-delete (frame)
+  "Tear down FRAME's popup and result buffer when FRAME goes away.
+Runs for every frame deletion, so it must be cheap and must not assume FRAME
+is one of ours.  Deliberately does NOT touch workspaces: a child frame gets a
+throwaway persp like any frame, and doom's own
+`+workspaces-delete-associated-workspace-h' already reclaims it -- verified,
+deleting a child frame leaves every surviving frame with a valid workspace."
+  (when (frame-live-p frame)
+    (let ((child (frame-parameter frame 'gfgkmn/osx-dict-child))
+          (id (frame-parameter frame 'gfgkmn/osx-dict-id)))
+      (when (frame-live-p child) (ignore-errors (delete-frame child)))
+      (when id
+        (let ((buf (get-buffer (format "*osx-dictionary %d*" id))))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(add-hook 'delete-frame-functions #'gfgkmn/osx-dict--cleanup-on-frame-delete)
 
 ;; Registering the rule is left to the CALLER, deliberately.  This package
 ;; provides the action function; where it goes in `display-buffer-alist' is the
