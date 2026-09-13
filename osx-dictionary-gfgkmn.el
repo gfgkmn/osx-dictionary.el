@@ -402,6 +402,10 @@ that \\[isearch-forward] / \"S\" prompt on PARENT's echo area."
   (make-frame
    `((name . "osx-dictionary")
      (parent-frame . ,parent)
+     ;; Out of `next-frame' / `previous-frame' / `other-frame' entirely, so
+     ;; cycling frames only ever visits real frames.  Measured: a child frame
+     ;; without this appears in the cycle; with it, it does not.
+     (no-other-frame . t)
      (minibuffer . nil)
      (undecorated . t)
      (width . 74) (height . 16)          ; provisional; the fit overrides it
@@ -494,6 +498,58 @@ deleting a child frame leaves every surviving frame with a valid workspace."
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
 (add-hook 'delete-frame-functions #'gfgkmn/osx-dict--cleanup-on-frame-delete)
+
+;;;; Frame switching: popups are invisible to cycling, and arriving at a frame
+;;;; hands focus to its open popup (non-modal)
+
+(defun gfgkmn/osx-dict--cycle-from-host-a (&rest _)
+  "Before a frame-cycling command: if a dictionary popup is selected, start from its parent.
+Popups carry `no-other-frame', so cycling skips them -- but a cycle still
+STARTS from the selected frame.  From inside A's popup the next eligible frame
+is A itself, so without this the command would just drop you onto A instead of
+moving on to the next frame."
+  (let* ((sel (selected-frame))
+         (host (frame-parameter sel 'parent-frame)))
+    (when (and host (frame-live-p host)
+               (eq (frame-parameter host 'gfgkmn/osx-dict-child) sel))
+      (select-frame host 'norecord))))
+
+(advice-add 'other-frame :before #'gfgkmn/osx-dict--cycle-from-host-a)
+
+(defvar gfgkmn/osx-dict--last-focused nil
+  "The frame that was selected at the previous focus event.")
+
+(defun gfgkmn/osx-dict--focus-change-h ()
+  "Arriving at a frame whose dictionary popup is open hands focus to the popup.
+
+Non-modal: it redirects only on ARRIVAL, when focus reaches a frame from
+anywhere other than that frame's own popup.  Leaving your popup for its parent
+-- a click, or a prompt that runs in the parent's minibuffer -- is deliberate
+and is respected; the popup simply stays open.
+
+Keyed on `selected-frame', NOT `frame-focus-state'.  On the NS port a frame
+that loses focus to another Emacs frame goes on reporting `t'.  Measured on
+real `]t' presses: every focus event showed two to four frames at `t' at once,
+so asking which ONE frame is focused never gets an answer -- an earlier version
+that insisted on exactly one never acted at all.  `selected-frame' at event
+time named the frame just arrived at, every time.  Leaving Emacs for another
+app and coming back leaves it unchanged, so that is simply a no-op.
+
+It cannot loop: it only ever focuses a popup, and a focused popup is a child
+frame, which never triggers a redirect."
+  (let ((now (selected-frame))
+        (prev gfgkmn/osx-dict--last-focused))
+    (when (and now (not (eq now prev)))
+      (setq gfgkmn/osx-dict--last-focused now)
+      (let ((popup (and (not (frame-parameter now 'parent-frame))
+                        (gfgkmn/osx-dict--popup-frame now))))
+        (when (and popup
+                   (not (eq prev popup))
+                   (eq (frame-visible-p popup) t)
+                   (not (active-minibuffer-window)))
+          (select-frame-set-input-focus popup))))))
+
+(add-function :after after-focus-change-function #'gfgkmn/osx-dict--focus-change-h)
 
 ;; Registering the rule is left to the CALLER, deliberately.  This package
 ;; provides the action function; where it goes in `display-buffer-alist' is the
