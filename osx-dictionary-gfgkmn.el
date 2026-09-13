@@ -411,11 +411,25 @@ that \\[isearch-forward] / \"S\" prompt on PARENT's echo area."
      (menu-bar-lines . 0) (tool-bar-lines . 0)
      (visibility . nil))))               ; shown only once sized, to avoid a jump
 
+(defun gfgkmn/osx-dict--use-child-frame-p ()
+  "Non-nil when this lookup should be shown in a child frame.
+Always in `child-frame' style.  In `window' style, still when the host frame is
+`unsplittable' -- a cc-delegate popup, for one.  There
+`display-buffer-pop-up-window' cannot split, every window action falls through,
+and Emacs's fallback borrows a window on ANOTHER frame, overwriting whatever that
+frame was showing.  Measured: a lookup from an unsplittable single-window frame
+landed in a different frame's root window, with or without the display rule.  A
+child frame of the host keeps the definition where it was asked for."
+  (or (eq gfgkmn/osx-dict-display-style 'child-frame)
+      (and (frame-parameter (gfgkmn/osx-dict--host-frame) 'unsplittable) t)))
+
 (defun gfgkmn/osx-dict-display-buffer (buffer _alist)
   "`display-buffer' action for `*osx-dictionary*'.
 Returns a window when it handled BUFFER, or nil to fall through to the
-ordinary window actions — which is what keeps the `window' style intact."
-  (if (not (eq gfgkmn/osx-dict-display-style 'child-frame))
+ordinary window actions — which is what keeps the `window' style intact on
+every frame that can actually hold a split; see
+`gfgkmn/osx-dict--use-child-frame-p'."
+  (if (not (gfgkmn/osx-dict--use-child-frame-p))
       (progn (with-current-buffer buffer (gfgkmn/osx-dict--apply-chrome nil))
              nil)
     (with-current-buffer buffer (gfgkmn/osx-dict--apply-chrome t))
@@ -446,10 +460,11 @@ ordinary window actions — which is what keeps the `window' style intact."
 Needed because `osx-dictionary--goto-dictionary' short-circuits to
 `select-window' when the buffer already has a window in the selected frame,
 so `display-buffer' — and with it the fit — never runs on that path."
-  (when (eq gfgkmn/osx-dict-display-style 'child-frame)
-    (let ((host (gfgkmn/osx-dict--host-frame)))
-      (when (gfgkmn/osx-dict--popup-frame host)
-        (gfgkmn/osx-dict--fit-and-centre host)))))
+  ;; Keyed on whether THIS host has a popup, not on the display style: in
+  ;; `window' style an unsplittable host still gets one.
+  (let ((host (gfgkmn/osx-dict--host-frame)))
+    (when (gfgkmn/osx-dict--popup-frame host)
+      (gfgkmn/osx-dict--fit-and-centre host))))
 
 (advice-add 'osx-dictionary--view-result :after #'gfgkmn/osx-dict--refit-a)
 
